@@ -1,0 +1,4 @@
+*.pgn
+__pycache__/
+*.pgn.zst
+all_libs
