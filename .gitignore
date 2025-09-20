@@ -2,3 +2,5 @@
 __pycache__/
 *.pgn.zst
 all_libs
+*.jsonl
+*.json
