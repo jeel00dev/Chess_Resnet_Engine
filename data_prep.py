@@ -1,22 +1,26 @@
+import os
 import chess
 import chess.pgn
 import chess.engine
 import zstandard
 import json
 from io import TextIOWrapper
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Process, cpu_count
 
-PGN_FILE = "lichess_db_standard_rated_2025-08.pgn.zst"
+PGN_ZST_FILE = "lichess_db_standard_rated_2025-08.pgn.zst"
 ENGINE_PATH = "/usr/bin/stockfish"
-OUTPUT_FILE = "chess_data.jsonl"
-
+OUTPUT_DIR = "chess_output"
+NUM_CHUNKS = 5
 NUM_TOP_MOVES = 5
 SEARCH_DEPTH = 12
-NUM_PROCESSES = min(8, cpu_count())
 
 
-def decompress_pgn(zst_file):
-    """Yield chess.pgn.Game objects from .zst file."""
+def ensure_output_dir():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def decompress_pgn_stream(zst_file):
+    """Stream PGN objects from zst file"""
     with open(zst_file, "rb") as fh:
         dctx = zstandard.ZstdDecompressor()
         with dctx.stream_reader(fh) as reader:
@@ -27,11 +31,10 @@ def decompress_pgn(zst_file):
                 game = chess.pgn.read_game(text_stream)
 
 
-def analyze_move(args):
-    """Analyze a single move on a board."""
-    fen, move_uci = args
-    engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
+def analyze_move(fen, move_uci):
+    """Analyze a single move with Stockfish"""
     board = chess.Board(fen)
+    engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
 
     info = engine.analyse(
         board, chess.engine.Limit(depth=SEARCH_DEPTH), multipv=NUM_TOP_MOVES
@@ -74,26 +77,38 @@ def analyze_move(args):
     }
 
 
-def extract_game_data_parallel(game):
-    board = game.board()
-    moves = list(game.mainline_moves())
-    args_list = []
+def process_chunk(chunk_index, total_chunks):
+    """Process one chunk of the PGN dataset"""
+    output_file = os.path.join(OUTPUT_DIR, f"chunk_{chunk_index}.jsonl")
+    print(f"[CHUNK {chunk_index}] Processing -> {output_file}")
+    with open(output_file, "w") as out:
+        for i, game in enumerate(decompress_pgn_stream(PGN_ZST_FILE)):
+            if i % total_chunks != chunk_index:
+                continue
 
-    for move in moves:
-        fen = board.fen()
-        args_list.append((fen, move.uci()))
-        board.push(move)
-
-    with Pool(NUM_PROCESSES) as pool:
-        return pool.map(analyze_move, args_list)
+            board = game.board()
+            for move in game.mainline_moves():
+                fen = board.fen()
+                move_uci = move.uci()
+                entry = analyze_move(fen, move_uci)
+                out.write(json.dumps(entry) + "\n")
+                board.push(move)
+    print(f"[CHUNK {chunk_index}] Done")
 
 
 def main():
-    with open(OUTPUT_FILE, "w") as out:
-        for game in decompress_pgn(PGN_FILE):
-            game_data = extract_game_data_parallel(game)
-            for entry in game_data:
-                out.write(json.dumps(entry) + "\n")
+    ensure_output_dir()
+    processes = []
+
+    for idx in range(NUM_CHUNKS):
+        p = Process(target=process_chunk, args=(idx, NUM_CHUNKS))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    print("All chunks processed!")
 
 
 if __name__ == "__main__":
