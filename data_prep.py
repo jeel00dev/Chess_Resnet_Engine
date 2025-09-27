@@ -1,53 +1,93 @@
+import chess
+import chess.pgn
+import chess.engine
+import zstandard
 import json
-import numpy as np
+from io import TextIOWrapper
+
+PGN_FILE = "lichess_db_standard_rated_2025-08.pgn.zst"
+ENGINE_PATH = "/usr/bin/stockfish"
+OUTPUT_FILE = "chess_data.jsonl"
+
+# Config
+NUM_TOP_MOVES = 5
+SEARCH_DEPTH = 15
 
 
-def cp_to_value(entry):
-    if "mate" in entry:
-        return 1.0 if entry["mate"] > 0 else -1.0
-    cp = entry.get("cp", 0)
-    return np.tanh(cp / 400.0)
+def decompress_pgn(zst_file):
+    """Stream PGN lines from a .zst file."""
+    with open(zst_file, "rb") as fh:
+        dctx = zstandard.ZstdDecompressor()
+        with dctx.stream_reader(fh) as reader:
+            text_stream = TextIOWrapper(reader, encoding="utf-8")
+            game = chess.pgn.read_game(text_stream)
+            while game:
+                yield game
+                game = chess.pgn.read_game(text_stream)
 
 
-def parse_jsonl_top_n(jsonl_path, out_path, max_samples=10000, top_n=3):
-    data = []
-    with open(jsonl_path, "r") as f:
-        for i, line in enumerate(f):
-            if i >= max_samples:
-                break
-            obj = json.loads(line)
-            fen = obj["fen"]
+def extract_game_data(game, engine):
+    board = game.board()
+    moves = list(game.mainline_moves())
+    game_data = []
 
-            evals = obj.get("evals", [])
-            if not evals:
-                continue
+    for move in moves:
+        fen = board.fen()
+        played_move = move.uci()
 
-            pvs = evals[0].get("pvs", [])
-            moves_list = []
+        info = engine.analyse(
+            board, chess.engine.Limit(depth=SEARCH_DEPTH), multipv=NUM_TOP_MOVES
+        )
 
-            for pv in pvs[:top_n]:
-                line_moves = pv.get("line", "").split()
-                if not line_moves:
-                    continue
-                first_move = line_moves[0]
-                value = cp_to_value(pv)
-                moves_list.append({"move": first_move, "value": value})
+        top_moves = []
+        policy = {}
+        total_score = 0
 
-            if not moves_list:
-                continue
+        for entry in info:
+            mv = entry["pv"][0]
+            score = entry["score"].pov(board.turn).score(mate_score=1000) / 100.0
+            top_moves.append({"move": mv.uci(), "score": round(score, 4)})
+            total_score += max(score, 0)
 
-            avg_value = np.mean([m["value"] for m in moves_list])
+        if total_score > 0:
+            for m in top_moves:
+                policy[m["move"]] = round(m["score"] / total_score, 4)
+        else:
+            for m in top_moves:
+                policy[m["move"]] = round(1.0 / len(top_moves), 4)
 
-            sample = {"fen": fen, "moves": moves_list, "value": avg_value}
-            data.append(sample)
+        board.push(move)
+        played_eval_info = engine.analyse(board, chess.engine.Limit(depth=SEARCH_DEPTH))
+        played_eval = (
+            played_eval_info["score"].pov(board.turn).score(mate_score=1000) / 100.0
+        )
+        played_eval = round(played_eval, 4)
+        board.pop()
 
-    with open(out_path, "w") as out:
-        json.dump(data, out, indent=2)
+        game_data.append(
+            {
+                "fen": fen,
+                "played_move": played_move,
+                "played_eval": played_eval,
+                "top_moves": top_moves,
+                "policy": policy,
+            }
+        )
 
-    print(f"Saved {len(data)} samples to {out_path}")
+        board.push(move)
+
+    return game_data
 
 
-jsonl_path = "/home/jeel00dev/Projects/chess_engine/lichess_db_eval.jsonl"
-out_path = "/home/jeel00dev/Projects/chess_engine/parsed_data.json"
+def main():
+    engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
+    with open(OUTPUT_FILE, "w") as out:
+        for game in decompress_pgn(PGN_FILE):
+            data = extract_game_data(game, engine)
+            for entry in data:
+                out.write(json.dumps(entry) + "\n")
+    engine.quit()
 
-parse_jsonl_top_n(jsonl_path, out_path, max_samples=10000, top_n=3)
+
+if __name__ == "__main__":
+    main()
