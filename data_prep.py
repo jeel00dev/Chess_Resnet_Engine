@@ -5,6 +5,16 @@ analyze_pgns.py
 Analyze many PGN files in parallel. For each input PGN file, produce one output JSONL file
 in out_dir named <pgn_basename>.jsonl.
 
+python3 analyze_pgns.py \
+  --pgn_dir split_pgns \
+  --out_dir parsed_data \
+  --engine /usr/bin/stockfish \
+  --workers 12 \
+  --threads 1 \
+  --depth 12 \
+  --top 5 \
+  --temp 1.0
+
 Each JSON line structure:
 {
   "fen": "...",
