@@ -4,7 +4,6 @@ train_and_selfplay.py
 
 python train_and_selfplay.py --mode supervised --lmdb dataset.lmdb --vocab vocab.json --out-dir runs/exp1 --epochs 5 --batch-size 32
 python train_and_selfplay.py --mode selfplay --lmdb dataset.lmdb --vocab vocab.json --out-dir runs/exp1_selfplay --mcts-sims 80 --selfplay-games 8 --batch-size 32
-https://chatgpt.com/c/68d981d5-1d80-832d-a7ae-69e7df589e75
 
 Large single-file script that provides:
  - LMDB dataset reader (expects dataset created by jsonl_to_lmdb.py)
