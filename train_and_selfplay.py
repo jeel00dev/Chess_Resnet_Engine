@@ -66,25 +66,65 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # -----------------------------
 # LMDB-backed Dataset (expects records written by jsonl_to_lmdb.py)
 # -----------------------------
-class LMDBChessDataset(Dataset):
-    def __init__(self, lmdb_path):
-        import pickle
 
-        self.env = lmdb.open(
-            lmdb_path, readonly=True, lock=False, readahead=False, meminit=False
+
+class LMDBChessDataset(torch.utils.data.Dataset):
+    """
+    LMDB dataset that is safe to use with multiple DataLoader workers.
+    It computes the dataset length once (in main process) and reopens
+    the LMDB env in each worker after forking.
+    """
+
+    def __init__(self, lmdb_path):
+        # store path; DO NOT open env here for long-lived use in parent process
+        self.lmdb_path = lmdb_path
+        self.env = None
+
+        # compute length safely by opening a temporary env and closing it
+        tmp_env = lmdb.open(
+            self.lmdb_path, readonly=True, lock=False, readahead=False, meminit=False
         )
-        with self.env.begin() as txn:
-            # count keys (quick way)
-            self.length = 0
+        with tmp_env.begin() as txn:
+            # count keys (fast enough for reasonable DB sizes)
+            cnt = 0
             cursor = txn.cursor()
             for _ in cursor:
-                self.length += 1
+                cnt += 1
+            self.length = cnt
+        tmp_env.close()
+
+    def __getstate__(self):
+        """
+        Called when pickling the object to send to worker processes.
+        Remove the `env` from state so file descriptors / mmap aren't shared.
+        """
+        state = self.__dict__.copy()
+        state["env"] = None
+        return state
+
+    def __setstate__(self, state):
+        """
+        Called when the dataset is unpickled inside each worker process.
+        Reopen the LMDB env here in the worker (safe — opened after fork).
+        """
+        self.__dict__.update(state)
+        self.env = lmdb.open(
+            self.lmdb_path, readonly=True, lock=False, readahead=False, meminit=False
+        )
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
-        import pickle
+        # double-check env is open (in case dataset was created on main and not unpickled)
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+            )
 
         key = f"{idx:08d}".encode("ascii")
         with self.env.begin() as txn:
@@ -92,9 +132,10 @@ class LMDBChessDataset(Dataset):
             if v is None:
                 raise IndexError(idx)
             record = pickle.loads(v)
+
         board = record["board"]  # numpy (18,8,8)
         board_t = torch.from_numpy(board).to(dtype=torch.float32)
-        # policy could be dense vector or sparse arrays
+        # policy handling same as before
         policy = record.get("policy", None)
         if policy is not None:
             policy_t = torch.from_numpy(policy).to(dtype=torch.float32)

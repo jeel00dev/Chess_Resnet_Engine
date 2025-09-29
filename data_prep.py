@@ -10,7 +10,6 @@ python3 analyze_pgns.py \
   --out_dir parsed_data \
   --engine /usr/bin/stockfish \
   --workers 12 \
-  --threads 1 \
   --depth 12 \
   --top 5 \
   --temp 1.0
