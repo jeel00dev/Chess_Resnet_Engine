@@ -45,6 +45,6 @@ def parse_pgn_zst(input_path, output_dir, max_games=10000000, min_moves=20):
 
 
 if __name__ == "__main__":
-    input_file = "/home/jeel00dev/Projects/chess_engine_project/data/raw/1.pgn.zst"
-    output_dir = "/home/jeel00dev/Projects/chess_engine_project/data/processed/"
+    input_file = "/home/jeel00dev/Projects/chess_engine/data/raw/lichess_db_standard_rated_2013-03.pgn.zst"
+    output_dir = "/home/jeel00dev/Projects/chess_engine/data/processed/"
     parse_pgn_zst(input_file, output_dir)
