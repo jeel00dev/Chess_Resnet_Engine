@@ -1,70 +1,73 @@
-#!/usr/bin/env python3
+import json
+import random
 import torch
-import numpy as np
-import tensorflow as tf
 import chess
 
-# -----------------------------
-# Load dataset (.pt)
-# -----------------------------
-data = torch.load("data/processed/train_tensor/tensor.pt")
-
-boards = data["boards"].float()  # (N,12,8,8)
-move_idx = data["move_index"].long()  # (N,)
-eval_true = data["eval"].float()  # (N,1)
-
-# Convert boards to TensorFlow format (N,8,8,12)
-boards_tf = boards.permute(0, 2, 3, 1).numpy()
-
-# -----------------------------
-# Load the saved TF model
-# -----------------------------
-model = tf.saved_model.load("exported_model")  # folder containing saved_model.pb
-infer = model.signatures["serving_default"]
+# ==== CONFIG ====
+TENSOR_FILE = "data/processed/train_tensor/tensor.pt"
+JSONL_FILE = "data/processed/stockfish_annotated/annotated.json"
+NUM_CHECKS = 100
+# ================
 
 
-# -----------------------------
-# Helper: decode move_index → UCI
-# -----------------------------
-def index_to_uci(idx):
-    from_sq = idx // 64
-    to_sq = idx % 64
-    ff, fr = from_sq % 8, from_sq // 8
-    tf, tr = to_sq % 8, to_sq // 8
-    return f"{chr(ff + 97)}{fr + 1}{chr(tf + 97)}{tr + 1}"
+def move_index_to_uci(move_index):
+    """Convert 0..4095 index → UCI string like 'e2e4'."""
+    from_sq = move_index // 64
+    to_sq = move_index % 64
+    return chess.square_name(from_sq) + chess.square_name(to_sq)
 
 
-# -----------------------------
-# Test a few random positions
-# -----------------------------
-import random
+def main():
+    print("Loading tensor.pt ...")
+    data = torch.load(TENSOR_FILE)
 
-samples = random.sample(range(len(boards_tf)), 5)
+    boards = data["boards"]  # (N,12,8,8)
+    move_index = data["move_index"]  # (N,)
+    eval_targets = data["eval"]  # (N,1)
 
-for i in samples:
-    x = boards_tf[i : i + 1]  # keep batch dim
-    gt_move = index_to_uci(move_idx[i].item())
-    gt_eval = eval_true[i].item()
+    print("Loading JSONL...")
+    fens = []
+    played_moves = []
+    evals = []
 
-    # Model forward pass
-    out = infer(tf.constant(x))
-    policy_logits = out["policy_logits"].numpy()[0]  # (4096,)
-    value_pred = out["value"].numpy()[0][0]  # scalar
+    with open(JSONL_FILE, "r") as f:
+        for line in f:
+            obj = json.loads(line)
+            fens.append(obj["fen"])
+            played_moves.append(obj["played_move"])
+            evals.append(float(obj["played_eval"]))
 
-    # Predicted move index
-    pred_idx = int(np.argmax(policy_logits))
-    pred_move = index_to_uci(pred_idx)
+    N = min(len(fens), len(move_index))
+    print(f"Dataset size aligned to: {N} positions\n")
 
-    print("--------------------------------------------------")
-    print(f"Position index    : {i}")
-    print(f"Ground Truth Move : {gt_move}")
-    print(f"Model Move        : {pred_move}")
-    print(f"Ground Truth Eval : {round(gt_eval, 4)}")
-    print(f"Model Eval        : {round(value_pred, 4)}")
+    indices = random.sample(range(N), min(NUM_CHECKS, N))
+    mismatches = 0
 
-    if pred_move == gt_move:
-        print("✅ MOVE MATCHES (model is reading board data correctly)")
-    else:
-        print("⚠️ MOVE DOES NOT MATCH (model is not perfect / still learning)")
+    for i in indices:
+        uci_from_tensor = move_index_to_uci(int(move_index[i].item()))
+        uci_from_json = played_moves[i]
 
-    print()
+        eval_tensor = float(eval_targets[i].item())
+        eval_json = evals[i]
+
+        move_ok = uci_from_tensor == uci_from_json
+        eval_ok = abs(eval_tensor - eval_json) < 1e-3  # tolerance
+
+        if not (move_ok and eval_ok):
+            mismatches += 1
+            print(f"[Mismatch @ index {i}]")
+            print(f"  FEN: {fens[i]}")
+            print(f"  JSON move:   {uci_from_json}")
+            print(f"  Tensor move: {uci_from_tensor}")
+            print(f"  JSON eval:   {eval_json}")
+            print(f"  Tensor eval: {eval_tensor}\n")
+
+    print("=====================================")
+    print(f"Checked {len(indices)} random positions.")
+    print(f"Matches: {len(indices) - mismatches}")
+    print(f"Mismatches: {mismatches}")
+    print("=====================================")
+
+
+if __name__ == "__main__":
+    main()
